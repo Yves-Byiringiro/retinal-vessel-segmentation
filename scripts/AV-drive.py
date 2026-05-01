@@ -105,5 +105,28 @@ print(f"SPLIT -> train {len(train_recs)} | val {len(val_recs)} | test {len(test_
 ID2PATH_TEST = {r["img"].stem: str(r["img"]) for r in test_recs}
 
 
+# ==== sanity check: 3 samples with overlay ====
+import matplotlib.pyplot as plt
 
+def _overlay_mask(img, msk, color=(255,0,0), alpha=0.45):
+    v = img.astype(np.float32).copy()
+    col = np.array(color, dtype=np.float32)
+    idx = msk.astype(bool)
+    v[idx] = (1-alpha)*v[idx] + alpha*col
+    return v.clip(0,255).astype(np.uint8)
+
+def show_samples(records, n=3, seed=42, title="train"):
+    picks = random.Random(seed).sample(records, k=min(n, len(records)))
+    for r in picks:
+        img = np.array(Image.open(r["img"]).convert("RGB"))
+        gt  = np.array(Image.open(r["gt"]).convert("L"))
+        gt  = (gt > 0).astype(np.uint8)
+        ov  = _overlay_mask(img, gt)
+        fig, axs = plt.subplots(1,3, figsize=(11,3.5))
+        axs[0].imshow(img); axs[0].set_title(f"{title} | {r['img'].stem}"); axs[0].axis("off")
+        axs[1].imshow(gt,cmap="gray"); axs[1].set_title("GT (manual1)"); axs[1].axis("off")
+        axs[2].imshow(ov); axs[2].set_title("Overlay"); axs[2].axis("off")
+        plt.tight_layout(); plt.show()
+
+show_samples(train_recs, n=3, seed=42, title="train")
 
