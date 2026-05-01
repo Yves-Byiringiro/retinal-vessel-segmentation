@@ -114,9 +114,6 @@ print(f"Total paired images: {len(all_imgs)}")
 assert len(all_imgs) > 0, "No image/mask pairs found. Check IMG_DIR / MASK_DIR."
 
 
-# In[3]:
-
-
 # ======== DATA SPLIT 70/15/15 ========
 idx = np.arange(len(all_imgs))
 train_idx, temp_idx = train_test_split(idx, test_size=0.30, random_state=SEED, shuffle=True)
@@ -130,9 +127,6 @@ val_imgs,   val_masks   = _take(val_idx)
 test_imgs,  test_masks  = _take(test_idx)
 
 print(f"Train: {len(train_imgs)} | Val: {len(val_imgs)} | Test: {len(test_imgs)}")
-
-
-# In[4]:
 
 
 # ======== TRANSFORMS ========
@@ -220,7 +214,6 @@ def build_model():
     return model.to(DEVICE)
 
 
-# In[5]:
 
 
 # ======== K-FOLD CV on TRAIN (70%) ========
