@@ -400,3 +400,146 @@ with open(os.path.join(OUTPUT_DIR, "cv5_val_summary.json"), "w") as f:
 print("\n===== CV 5-Fold Validation Summary =====")
 print(json.dumps(cv_summary, indent=2))
 print("✓ Saved cv5_val_summary.json")
+
+
+# ========= Visualize 5-fold training history (HRF) =========
+import os, json, glob
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# --- config (uses same OUTPUT_DIR and FOLDS you defined above) ---
+assert os.path.isdir(OUTPUT_DIR), f"OUTPUT_DIR not found: {OUTPUT_DIR}"
+
+# ---------- helpers ----------
+def _load_fold_history(fold_idx, output_dir=OUTPUT_DIR):
+    path = os.path.join(output_dir, f"history_fold{fold_idx}.csv")
+    if not os.path.exists(path):
+        print(f"[warn] missing: {path}")
+        return None
+    df = pd.read_csv(path)
+    # add epoch column 1..N (in case it isn't there)
+    if "epoch" not in df.columns:
+        df.insert(0, "epoch", np.arange(1, len(df)+1))
+    return df
+
+def _best_epoch(df, by="val_loss", mode="min"):
+    if df is None or by not in df.columns:
+        return None, None
+    if mode == "min":
+        i = int(df[by].idxmin())
+    else:
+        i = int(df[by].idxmax())
+    row = df.iloc[i].to_dict()
+    return i+1, row  # epoch index is 1-based
+
+def _overlay_plot(histories, key_train, key_val, title, ylabel):
+    plt.figure(figsize=(7.5,5))
+    for k, df in histories.items():
+        if df is None: continue
+        plt.plot(df["epoch"], df[key_train], alpha=0.65, lw=1.8, label=f"Fold {k} Train")
+        plt.plot(df["epoch"], df[key_val],   alpha=0.85, lw=2.2, linestyle="--", label=f"Fold {k} Val")
+    plt.title(title)
+    plt.xlabel("Epoch"); plt.ylabel(ylabel)
+    plt.grid(True, alpha=0.3); plt.legend(ncol=2, fontsize=9)
+    plt.tight_layout(); plt.show()
+
+def _mean_std_plot(histories, key_train, key_val, title, ylabel):
+    # stack to [folds, epochs]
+    mats_tr, mats_va = [], []
+    x = None
+    for k, df in histories.items():
+        if df is None: continue
+        mats_tr.append(df[key_train].values)
+        mats_va.append(df[key_val].values)
+        x = df["epoch"].values
+    if not mats_tr:
+        print("[warn] no histories found for mean±std plot")
+        return
+    tr = np.vstack(mats_tr)
+    va = np.vstack(mats_va)
+    plt.figure(figsize=(7.5,5))
+    # train
+    plt.plot(x, tr.mean(0), lw=2.5, label="Train (mean)")
+    plt.fill_between(x, tr.mean(0)-tr.std(0), tr.mean(0)+tr.std(0), alpha=0.2, label="Train (±1σ)")
+    # val
+    plt.plot(x, va.mean(0), lw=2.5, linestyle="--", label="Val (mean)")
+    plt.fill_between(x, va.mean(0)-va.std(0), va.mean(0)+va.std(0), alpha=0.2, label="Val (±1σ)")
+    plt.title(title); plt.xlabel("Epoch"); plt.ylabel(ylabel)
+    plt.grid(True, alpha=0.3); plt.legend()
+    plt.tight_layout(); plt.show()
+
+def _plot_lr(histories):
+    plt.figure(figsize=(7,4))
+    for k, df in histories.items():
+        if df is None or "lr" not in df.columns: continue
+        plt.plot(df["epoch"], df["lr"], label=f"Fold {k}")
+    plt.title("Learning Rate per Fold"); plt.xlabel("Epoch"); plt.ylabel("LR")
+    plt.grid(True, alpha=0.3); plt.legend(); plt.tight_layout(); plt.show()
+
+# ---------- load all fold histories ----------
+histories = {f: _load_fold_history(f) for f in range(1, FOLDS+1)}
+
+# ---------- quick per-fold best-epoch table ----------
+rows = []
+for f, df in histories.items():
+    if df is None:
+        continue
+    e_min, row_min = _best_epoch(df, by="val_loss", mode="min")
+    e_max, row_max = _best_epoch(df, by="val_dice", mode="max")
+    rows.append({
+        "fold": f,
+        "best_epoch_by_val_loss": e_min,
+        "val_loss(best)": None if row_min is None else round(row_min["val_loss"], 4),
+        "val_dice(at_best_loss)": None if row_min is None else round(row_min["val_dice"], 4),
+        "best_epoch_by_val_dice": e_max,
+        "val_dice(best)": None if row_max is None else round(row_max["val_dice"], 4),
+        "val_acc(at_best_dice)": None if row_max is None else round(row_max["val_acc"], 4),
+    })
+best_table = pd.DataFrame(rows).sort_values("fold")
+print("Per-fold best epochs:")
+display(best_table)
+
+# ---------- also show cv5_val_summary.json if present ----------
+cv_sum_path = os.path.join(OUTPUT_DIR, "cv5_val_summary.json")
+if os.path.exists(cv_sum_path):
+    with open(cv_sum_path, "r") as f:
+        cvsum = json.load(f)
+    print("\nCV summary (from cv5_val_summary.json):")
+    display(pd.DataFrame(cvsum["per_fold"]).sort_values("fold"))
+    print("Mean across folds:", cvsum.get("mean", {}))
+else:
+    print("\n[warn] cv5_val_summary.json not found (it’s written at the end of CV training).")
+
+# ---------- per-fold individual plots ----------
+for f, df in histories.items():
+    if df is None:
+        continue
+    fig, axs = plt.subplots(1, 3, figsize=(14,4))
+    axs[0].plot(df["epoch"], df["train_loss"], label="Train");
+    axs[0].plot(df["epoch"], df["val_loss"],   label="Val", linestyle="--")
+    axs[0].set_title(f"Fold {f} — Loss"); axs[0].set_xlabel("Epoch"); axs[0].set_ylabel("BCE+Dice"); axs[0].grid(True); axs[0].legend()
+
+    axs[1].plot(df["epoch"], df["train_dice"], label="Train");
+    axs[1].plot(df["epoch"], df["val_dice"],   label="Val", linestyle="--")
+    axs[1].set_title(f"Fold {f} — Dice"); axs[1].set_xlabel("Epoch"); axs[1].set_ylabel("Dice"); axs[1].grid(True); axs[1].legend()
+
+    axs[2].plot(df["epoch"], df["train_acc"], label="Train");
+    axs[2].plot(df["epoch"], df["val_acc"],   label="Val", linestyle="--")
+    axs[2].set_title(f"Fold {f} — Accuracy"); axs[2].set_xlabel("Epoch"); axs[2].set_ylabel("Accuracy"); axs[2].grid(True); axs[2].legend()
+
+    plt.tight_layout(); plt.show()
+
+# ---------- overlays: all folds on the same chart ----------
+_overlay_plot(histories, "train_loss", "val_loss", "Loss — all folds", "BCE + Dice")
+_overlay_plot(histories, "train_dice", "val_dice", "Dice — all folds", "Dice")
+_overlay_plot(histories, "train_acc",  "val_acc",  "Accuracy — all folds", "Accuracy")
+
+# ---------- mean ± std across folds ----------
+_mean_std_plot(histories, "train_loss", "val_loss", "Loss — mean ± std across folds", "BCE + Dice")
+_mean_std_plot(histories, "train_dice", "val_dice", "Dice — mean ± std across folds", "Dice")
+_mean_std_plot(histories, "train_acc",  "val_acc",  "Accuracy — mean ± std across folds", "Accuracy")
+
+# ---------- LR schedule ----------
+_plot_lr(histories)
+
