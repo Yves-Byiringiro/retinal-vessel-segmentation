@@ -192,3 +192,211 @@ test_loader  = DataLoader(HRFDataset(test_recs,  transform=val_tf),   batch_size
 b = next(iter(train_loader))
 print("Batch shapes:", tuple(b["image"].shape), tuple(b["mask"].shape), "FOV" if "fov" in b else "(no FOV)")
 
+
+# ========= Model, Loss, Metrics + 5-Fold Cross-Validation (HRF) =========
+import os, time, json, random
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader
+import segmentation_models_pytorch as smp
+
+# ----------------- fixed hyper-params (same as before) -----------------
+DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+EPOCHS        = 60           # <== epochs visible here
+LEARNING_RATE = 1e-4
+ACC_THR       = 0.5
+OUTPUT_DIR    = r"C:\Users\SC\Documents\Data and Code\AV DRIVE\AV_DRIVE\training"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ----------------- model -----------------
+def build_model():
+    """UNet++ with ResNet34 encoder (ImageNet), 3→1, same as your previous setup."""
+    return smp.UnetPlusPlus(
+        encoder_name="resnet34",
+        encoder_weights="imagenet",
+        in_channels=3,
+        classes=1
+    ).to(DEVICE)
+
+# ----------------- losses & metrics -----------------
+bce_loss = nn.BCEWithLogitsLoss().to(DEVICE)
+
+def _apply_fov(t, fov):
+    # t, fov: [B,1,H,W]
+    return t * fov if fov is not None else t
+
+def dice_coef(pred, target, fov=None, eps=1e-7):
+    prob = torch.sigmoid(pred)
+    prob   = _apply_fov(prob,   fov)
+    target = _apply_fov(target, fov)
+    num = 2.0 * (prob * target).sum(dim=(2,3))
+    den = (prob + target).sum(dim=(2,3)) + eps
+    return (num / den).mean()
+
+def accuracy(pred, target, fov=None, thr=ACC_THR):
+    prob  = torch.sigmoid(pred)
+    predb = (prob > thr).float()
+    predb  = _apply_fov(predb,  fov)
+    target = _apply_fov(target, fov)
+    return (predb == target).float().mean()
+
+def criterion(pred, target, fov=None, bce_w=0.5):
+    bce = bce_loss(_apply_fov(pred, fov), _apply_fov(target, fov))
+    dsc = 1.0 - dice_coef(pred, target, fov=fov)
+    return bce_w*bce + (1.0 - bce_w)*dsc
+
+@torch.no_grad()
+def evaluate(model, loader):
+    model.eval()
+    tloss, tdice, tacc = [], [], []
+    for batch in loader:
+        img = batch["image"].to(DEVICE)
+        msk = batch["mask"].to(DEVICE)
+        fov = batch.get("fov"); fov = fov.to(DEVICE) if fov is not None else None
+        out = model(img)
+        loss = criterion(out, msk, fov=fov)
+        tloss.append(loss.item())
+        tdice.append(dice_coef(out, msk, fov=fov).item())
+        tacc.append(accuracy(out, msk, fov=fov).item())
+    return {"loss": float(np.mean(tloss)),
+            "dice": float(np.mean(tdice)),
+            "acc":  float(np.mean(tacc))}
+
+def train_one_epoch(model, loader, optimizer):
+    model.train()
+    tloss, tdice, tacc = [], [], []
+    for batch in loader:
+        img = batch["image"].to(DEVICE)
+        msk = batch["mask"].to(DEVICE)
+        fov = batch.get("fov"); fov = fov.to(DEVICE) if fov is not None else None
+        optimizer.zero_grad()
+        out = model(img)
+        loss = criterion(out, msk, fov=fov)
+        loss.backward()
+        optimizer.step()
+        tloss.append(loss.item())
+        tdice.append(dice_coef(out, msk, fov=fov).item())
+        tacc.append(accuracy(out, msk, fov=fov).item())
+    return float(np.mean(tloss)), float(np.mean(tdice)), float(np.mean(tacc))
+
+# ----------------- 5-fold cross validation -----------------
+FOLDS = 5
+SEED  = 42
+pin   = torch.cuda.is_available()
+
+# Use all available records for CV. We accept either:
+#   - `pairs`  (single combined list of dicts: {"img","gt","fov"})
+#   - or train/val/test lists you created before: `train_recs`, `val_recs`, `test_recs`
+if 'pairs' in globals():
+    pairs_all = list(pairs)
+elif all(k in globals() for k in ['train_recs','val_recs','test_recs']):
+    pairs_all = list(train_recs) + list(val_recs) + list(test_recs)
+else:
+    raise RuntimeError("Please define `pairs` OR (`train_recs`,`val_recs`,`test_recs`) before running CV.")
+
+# HRFDataset, train_tf, val_tf, BATCH_SIZE must already be defined earlier.
+def make_loaders(idx_train, idx_val):
+    recs_tr = [pairs_all[i] for i in idx_train]
+    recs_va = [pairs_all[i] for i in idx_val]
+    dl_tr = DataLoader(HRFDataset(recs_tr, transform=train_tf), batch_size=BATCH_SIZE,
+                       shuffle=True,  num_workers=0, pin_memory=pin)
+    dl_va = DataLoader(HRFDataset(recs_va, transform=val_tf),   batch_size=BATCH_SIZE,
+                       shuffle=False, num_workers=0, pin_memory=pin)
+    return dl_tr, dl_va
+
+# build fold bins
+N = len(pairs_all)
+indices = list(range(N))
+random.Random(SEED).shuffle(indices)
+fold_bins = np.array_split(indices, FOLDS)
+
+cv_summary = {"per_fold": [], "mean": {}}
+
+for f in range(FOLDS):
+    print(f"\n==================== Fold {f+1}/{FOLDS} ====================")
+    torch.manual_seed(SEED+f); np.random.seed(SEED+f); random.seed(SEED+f)
+    if torch.cuda.is_available(): torch.cuda.manual_seed_all(SEED+f)
+
+    val_idx   = list(fold_bins[f])
+    train_idx = [i for k in range(FOLDS) if k != f for i in fold_bins[k]]
+    train_loader, val_loader = make_loaders(train_idx, val_idx)
+
+    model     = build_model()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.1, patience=5, min_lr=1e-6
+    )
+
+    history = {
+        "train_loss": [], "val_loss": [],
+        "train_dice": [], "val_dice": [],
+        "train_acc":  [], "val_acc":  [],
+        "lr": []
+    }
+
+    best_val  = float("inf")
+    best_path = os.path.join(OUTPUT_DIR, f"unetpp_hrf_best_fold{f+1}.pth")
+
+    for epoch in range(1, EPOCHS+1):
+        t0 = time.time()
+        tr_loss, tr_dice, tr_acc = train_one_epoch(model, train_loader, optimizer)
+        va_metrics = evaluate(model, val_loader)
+        scheduler.step(va_metrics["loss"])
+
+        history["train_loss"].append(tr_loss)
+        history["train_dice"].append(tr_dice)
+        history["train_acc"].append(tr_acc)
+        history["val_loss"].append(va_metrics["loss"])
+        history["val_dice"].append(va_metrics["dice"])
+        history["val_acc"].append(va_metrics["acc"])
+        history["lr"].append(optimizer.param_groups[0]["lr"])
+
+        if va_metrics["loss"] < best_val:
+            best_val = va_metrics["loss"]
+            torch.save({"state_dict": model.state_dict(), "epoch": epoch}, best_path)
+
+        dt = time.time() - t0
+        print(f"Fold {f+1} | Epoch {epoch:02d}/{EPOCHS} | "
+              f"Train L {tr_loss:.4f} D {tr_dice:.3f} A {tr_acc:.3f} | "
+              f"Val L {va_metrics['loss']:.4f} D {va_metrics['dice']:.3f} A {va_metrics['acc']:.3f} | "
+              f"time {dt:.1f}s")
+
+    # save per-fold history and evaluate best on its val set
+    hist_csv = os.path.join(OUTPUT_DIR, f"history_fold{f+1}.csv")
+    pd.DataFrame(history).to_csv(hist_csv, index=False)
+    print(f"✓ Saved {hist_csv}")
+    print(f"✓ Best checkpoint -> {best_path}")
+
+    ckpt = torch.load(best_path, map_location=DEVICE)
+    model.load_state_dict(ckpt["state_dict"])
+    model.to(DEVICE).eval()
+    best_metrics = evaluate(model, val_loader)
+
+    cv_summary["per_fold"].append({
+        "fold": f+1,
+        "loss": float(best_metrics["loss"]),
+        "dice": float(best_metrics["dice"]),
+        "acc":  float(best_metrics["acc"]),
+        "best_ckpt": os.path.basename(best_path)
+    })
+
+    # free memory between folds
+    del model
+    if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+# aggregate mean metrics across folds
+cv_summary["mean"] = {
+    "loss": float(np.mean([r["loss"] for r in cv_summary["per_fold"]])),
+    "dice": float(np.mean([r["dice"] for r in cv_summary["per_fold"]])),
+    "acc":  float(np.mean([r["acc"]  for r in cv_summary["per_fold"]]))
+}
+
+with open(os.path.join(OUTPUT_DIR, "cv5_val_summary.json"), "w") as f:
+    json.dump(cv_summary, f, indent=2)
+
+print("\n===== CV 5-Fold Validation Summary =====")
+print(json.dumps(cv_summary, indent=2))
+print("✓ Saved cv5_val_summary.json")
