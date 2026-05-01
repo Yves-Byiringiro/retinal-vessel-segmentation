@@ -334,9 +334,6 @@ print("\n[CV] Done.")
 pd.DataFrame(fold_summaries)
 
 
-# In[5]:
-
-
 # ======== TEST INFERENCE (BEST OF EACH FOLD) + DICE & INFERENCE TIME ========
 import time
 
@@ -458,9 +455,6 @@ if summary_rows:
     print("Saved summary:", OUT_ROOT / "test_summary_all_folds.csv")
 
 
-# In[6]:
-
-
 # ======== TEST INFERENCE (BEST OF EACH FOLD) ========
 class _TestSet(Dataset):
     def __init__(self, imgs, masks=None, tf=None):
@@ -544,8 +538,6 @@ if all_rows:
     print("Saved:", OUT_ROOT / "test_metrics_all_folds.csv")
 
 
-# In[7]:
-
 
 # ======== PANELS PER FOLD ========
 def make_fold_panel(fold_dir: Path, n_examples=5, mode="bestworst"):
@@ -592,7 +584,6 @@ for fd in sorted(OUT_ROOT.glob("fold_*")):
     make_fold_panel(fd, n_examples=5, mode="bestworst")
 
 
-# In[8]:
 
 
 # ======== TRAINING CURVES: PER-FOLD + MEAN±SD ========
@@ -645,9 +636,6 @@ for fold in range(1, FOLDS+1):
 # Mean±SD across folds
 plot_mean_std("val_loss", "Validation Loss — Mean ± SD (K=5)", "Loss", "val_loss_mean_std.png")
 plot_mean_std("val_dice", "Validation Dice — Mean ± SD (K=5)", "Dice", "val_dice_mean_std.png")
-
-
-# In[ ]:
 
 
 
