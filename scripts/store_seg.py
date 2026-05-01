@@ -1,8 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
 
 # ======== SETUP & CONFIG ========
 import os, random, warnings, math
@@ -58,8 +53,6 @@ torch.manual_seed(SEED)
 if DEVICE.type == "cuda":
     torch.cuda.manual_seed_all(SEED)
 
-
-# In[2]:
 
 
 # ======== IO HELPERS ========
@@ -564,7 +557,7 @@ if all_rows:
 # ======== PANELS PER FOLD ========
 def make_fold_panel(fold_dir: Path, n_examples=5, mode="bestworst"):
     csv = fold_dir / "test_metrics_per_image.csv"
-    if not csv.exists(): 
+    if not csv.exists():
         print(f"[SKIP] {csv} not found"); return
     df = pd.read_csv(csv)
     df["dice"] = pd.to_numeric(df["dice"], errors="coerce")
@@ -615,7 +608,7 @@ def plot_mean_std(metric_col, title, ylabel, save_name):
     frames = []
     for fold in range(1, FOLDS+1):
         hp = OUT_ROOT / f"fold_{fold:02d}" / "logs" / "history.csv"
-        if not hp.exists(): 
+        if not hp.exists():
             continue
         df = pd.read_csv(hp)
         df["fold"] = fold
@@ -640,7 +633,7 @@ def plot_mean_std(metric_col, title, ylabel, save_name):
 # Per-fold figures (loss & dice)
 for fold in range(1, FOLDS+1):
     hp = OUT_ROOT / f"fold_{fold:02d}" / "logs" / "history.csv"
-    if not hp.exists(): 
+    if not hp.exists():
         continue
     hist = pd.read_csv(hp)
     plt.figure(figsize=(12,4), dpi=130)
