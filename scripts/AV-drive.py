@@ -130,3 +130,65 @@ def show_samples(records, n=3, seed=42, title="train"):
 
 show_samples(train_recs, n=3, seed=42, title="train")
 
+
+# ==== Dataset & DataLoaders ====
+import albumentations as A
+import cv2
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+IMG_SIZE   = 512
+BATCH_SIZE = 2
+
+class HRFDataset(Dataset):
+    def __init__(self, records, transform=None):
+        self.records   = records
+        self.transform = transform
+
+    def __len__(self): return len(self.records)
+
+    def __getitem__(self, idx):
+        rec = self.records[idx]
+        img = np.array(Image.open(rec["img"]).convert("RGB"))
+        gt  = np.array(Image.open(rec["gt"]).convert("L"))
+        gt  = (gt > 0).astype(np.uint8)
+        fov = None
+        if rec.get("fov"):
+            fov = np.array(Image.open(rec["fov"]).convert("L"))
+            fov = (fov > 0).astype(np.uint8)
+
+        if self.transform is not None:
+            aug = self.transform(image=img, mask=gt)
+            img, gt = aug["image"], aug["mask"]
+            if fov is not None:
+                fov = A.Resize(IMG_SIZE, IMG_SIZE, interpolation=cv2.INTER_NEAREST)(image=fov)["image"]
+
+        img = img.astype(np.float32) / 255.0
+        gt  = gt.astype(np.float32)
+        if fov is not None: fov = fov.astype(np.float32)
+
+        out = {
+            "image": torch.from_numpy(img.transpose(2,0,1)),
+            "mask":  torch.from_numpy(gt).unsqueeze(0),
+            "id":    rec["img"].stem
+        }
+        if fov is not None:
+            out["fov"] = torch.from_numpy(fov).unsqueeze(0).float()
+        return out
+
+train_tf = A.Compose([
+    A.Resize(IMG_SIZE, IMG_SIZE, interpolation=cv2.INTER_LINEAR),
+    A.HorizontalFlip(p=0.5),
+    A.VerticalFlip(p=0.5),
+    A.RandomBrightnessContrast(0.1,0.1,p=0.5),
+])
+val_tf = A.Compose([A.Resize(IMG_SIZE, IMG_SIZE, interpolation=cv2.INTER_LINEAR)])
+
+pin = torch.cuda.is_available()
+train_loader = DataLoader(HRFDataset(train_recs, transform=train_tf), batch_size=BATCH_SIZE, shuffle=True,  num_workers=0, pin_memory=pin)
+val_loader   = DataLoader(HRFDataset(val_recs,   transform=val_tf),   batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=pin)
+test_loader  = DataLoader(HRFDataset(test_recs,  transform=val_tf),   batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=pin)
+
+b = next(iter(train_loader))
+print("Batch shapes:", tuple(b["image"].shape), tuple(b["mask"].shape), "FOV" if "fov" in b else "(no FOV)")
+
