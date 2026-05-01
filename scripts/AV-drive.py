@@ -543,3 +543,256 @@ _mean_std_plot(histories, "train_acc",  "val_acc",  "Accuracy — mean ± std ac
 # ---------- LR schedule ----------
 _plot_lr(histories)
 
+
+# ========= CV-aware TEST evaluation + PREDICTIONS (HRF) =========
+import os, json, glob, numpy as np
+import torch
+import cv2
+from PIL import Image
+from torch.utils.data import DataLoader
+import matplotlib.pyplot as plt
+
+# --- ensure we have a test_loader (70/15/15 split made earlier) ---
+pin = torch.cuda.is_available()
+if 'test_loader' not in globals():
+    assert 'test_recs' in globals(), "Define test_recs (list of records) first."
+    test_loader = DataLoader(HRFDataset(test_recs, transform=val_tf),
+                             batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=pin)
+
+# --- helpers to load best/all fold models ---
+def load_best_fold_model(select_metric="dice"):
+    """
+    Choose the best fold using cv5_val_summary.json (created during CV training).
+    select_metric: 'dice' (max), 'acc' (max), or 'loss' (min).
+    Returns: (model, best_fold_idx, best_row_dict)
+    """
+    summary_path = os.path.join(OUTPUT_DIR, "cv5_val_summary.json")
+    assert os.path.exists(summary_path), f"Missing {summary_path} — run CV training first."
+    with open(summary_path, "r") as f:
+        summary = json.load(f)
+    rows = summary["per_fold"]
+    if select_metric.lower() == "loss":
+        best = min(rows, key=lambda r: r["loss"])
+    else:  # 'dice' or 'acc'
+        best = max(rows, key=lambda r: r[select_metric.lower()])
+    best_fold = int(best["fold"])
+    ckpt_path = os.path.join(OUTPUT_DIR, f"unetpp_hrf_best_fold{best_fold}.pth")
+    assert os.path.exists(ckpt_path), f"Missing checkpoint: {ckpt_path}"
+    m = build_model()
+    m.load_state_dict(torch.load(ckpt_path, map_location=DEVICE)["state_dict"])
+    m.to(DEVICE).eval()
+    print(f"[BEST] Using fold {best_fold} by {select_metric}:",
+          {k: round(v,4) for k,v in best.items() if k not in ["fold","best_ckpt"]})
+    return m, best_fold, best
+
+def load_all_fold_models():
+    ckpts = sorted(glob.glob(os.path.join(OUTPUT_DIR, "unetpp_hrf_best_fold*.pth")))
+    assert len(ckpts) >= 1, "No fold checkpoints found — run CV training first."
+    models = []
+    for ck in ckpts:
+        m = build_model()
+        m.load_state_dict(torch.load(ck, map_location=DEVICE)["state_dict"])
+        m.to(DEVICE).eval()
+        models.append(m)
+    print(f"[ENSEMBLE] Loaded {len(models)} fold models.")
+    return models
+
+# --- (optional) evaluation with ensemble (average logits) ---
+@torch.no_grad()
+def evaluate_ensemble(models, loader):
+    tloss, tdice, tacc = [], [], []
+    for batch in loader:
+        img = batch["image"].to(DEVICE)
+        msk = batch["mask"].to(DEVICE)
+        fov = batch.get("fov")
+        fov = fov.to(DEVICE) if fov is not None else None
+
+        logits_sum = None
+        for m in models:
+            out = m(img)
+            logits_sum = out if logits_sum is None else (logits_sum + out)
+        out = logits_sum / len(models)
+
+        loss = criterion(out, msk, fov=fov)
+        tloss.append(loss.item())
+        tdice.append(dice_coef(out, msk, fov=fov).item())
+        tacc.append(accuracy(out, msk, fov=fov).item())
+
+    return {"loss": float(np.mean(tloss)),
+            "dice": float(np.mean(tdice)),
+            "acc":  float(np.mean(tacc))}
+
+# --- utilities to save predictions at ORIGINAL size ---
+def _resize_to_original(arr, target_w, target_h, is_mask):
+    if arr.ndim == 2:
+        inter = cv2.INTER_NEAREST if is_mask else cv2.INTER_LINEAR
+        return cv2.resize(arr, (target_w, target_h), interpolation=inter)
+    elif arr.ndim == 3:
+        inter = cv2.INTER_NEAREST if is_mask else cv2.INTER_LINEAR
+        return cv2.resize(arr, (target_w, target_h), interpolation=inter)
+    else:
+        raise ValueError("Unsupported array shape for resize.")
+
+def _get_orig_hw(img_id):
+    # use true original image to get H,W
+    assert 'ID2PATH_TEST' in globals(), "ID2PATH_TEST not defined — build it from test_recs earlier."
+    path = ID2PATH_TEST.get(img_id, None)
+    if path is None or not os.path.exists(path):
+        return None
+    im = Image.open(path).convert("RGB")
+    w, h = im.size
+    im.close()
+    return (h, w)
+
+@torch.no_grad()
+def save_test_predictions_bestfold(out_dir, thr=0.5, save_probs=False, apply_fov=True, resize_to_original=True):
+    os.makedirs(out_dir, exist_ok=True)
+    model, best_fold, _ = load_best_fold_model(select_metric="dice")
+    print(f"[SAVE] Best-fold predictions -> {out_dir}")
+    for batch in test_loader:
+        imgs = batch["image"].to(DEVICE)
+        ids  = batch["id"]
+        fov  = batch.get("fov")
+        fov  = fov.to(DEVICE) if fov is not None else None
+
+        logits = model(imgs)
+        probs  = torch.sigmoid(logits)
+        if apply_fov and (fov is not None):
+            probs = probs * fov
+
+        probs_np = probs.squeeze(1).cpu().numpy()   # [B,H,W]
+        preds_np = (probs_np > thr).astype(np.uint8) * 255
+
+        for i, img_id in enumerate(ids):
+            # resize back to HRF original size
+            out_prob = probs_np[i]
+            out_mask = preds_np[i]
+            if resize_to_original:
+                hw = _get_orig_hw(img_id)
+                if hw is not None:
+                    H, W = hw
+                    out_prob = _resize_to_original(out_prob, W, H, is_mask=False)
+                    out_mask = _resize_to_original(out_mask, W, H, is_mask=True)
+
+            # save
+            mask_path = os.path.join(out_dir, f"{img_id}_pred_best.png")
+            cv2.imwrite(mask_path, out_mask)
+            if save_probs:
+                prob_path = os.path.join(out_dir, f"{img_id}_prob_best.png")
+                cv2.imwrite(prob_path, (np.clip(out_prob,0,1)*255).astype(np.uint8))
+
+@torch.no_grad()
+def save_test_predictions_ensemble(out_dir, thr=0.5, save_probs=False, apply_fov=True, resize_to_original=True):
+    os.makedirs(out_dir, exist_ok=True)
+    models = load_all_fold_models()
+    print(f"[SAVE] Ensemble predictions -> {out_dir}")
+    for batch in test_loader:
+        imgs = batch["image"].to(DEVICE)
+        ids  = batch["id"]
+        fov  = batch.get("fov")
+        fov  = fov.to(DEVICE) if fov is not None else None
+
+        logits_sum = None
+        for m in models:
+            out = m(imgs)
+            logits_sum = out if logits_sum is None else (logits_sum + out)
+        logits = logits_sum / len(models)
+        probs  = torch.sigmoid(logits)
+        if apply_fov and (fov is not None):
+            probs = probs * fov
+
+        probs_np = probs.squeeze(1).cpu().numpy()
+        preds_np = (probs_np > thr).astype(np.uint8) * 255
+
+        for i, img_id in enumerate(ids):
+            out_prob = probs_np[i]
+            out_mask = preds_np[i]
+            if resize_to_original:
+                hw = _get_orig_hw(img_id)
+                if hw is not None:
+                    H, W = hw
+                    out_prob = _resize_to_original(out_prob, W, H, is_mask=False)
+                    out_mask = _resize_to_original(out_mask, W, H, is_mask=True)
+
+            mask_path = os.path.join(out_dir, f"{img_id}_pred_ens.png")
+            cv2.imwrite(mask_path, out_mask)
+            if save_probs:
+                prob_path = os.path.join(out_dir, f"{img_id}_prob_ens.png")
+                cv2.imwrite(prob_path, (np.clip(out_prob,0,1)*255).astype(np.uint8))
+
+# --- TEST evaluation (best fold and ensemble) ---
+# Evaluate best fold on TEST
+best_model, best_fold, _ = load_best_fold_model(select_metric="dice")
+test_metrics_best = evaluate(best_model, test_loader)
+print("\n[TEST] Best fold metrics:")
+for k, v in test_metrics_best.items():
+    print(f"  {k}: {v:.4f}")
+with open(os.path.join(OUTPUT_DIR, f"test_metrics_best_fold{best_fold}.json"), "w") as f:
+    json.dump({k: float(v) for k, v in test_metrics_best.items()}, f, indent=2)
+
+# Evaluate ensemble on TEST (optional, often slightly better)
+models_ens = load_all_fold_models()
+test_metrics_ens = evaluate_ensemble(models_ens, test_loader)
+print("\n[TEST] Ensemble metrics:")
+for k, v in test_metrics_ens.items():
+    print(f"  {k}: {v:.4f}")
+with open(os.path.join(OUTPUT_DIR, "test_metrics_ensemble.json"), "w") as f:
+    json.dump({k: float(v) for k, v in test_metrics_ens.items()}, f, indent=2)
+
+# --- Save predictions to disk ---
+save_test_predictions_bestfold(
+    out_dir=os.path.join(OUTPUT_DIR, "preds_best"),
+    thr=0.5, save_probs=False, apply_fov=True, resize_to_original=True
+)
+save_test_predictions_ensemble(
+    out_dir=os.path.join(OUTPUT_DIR, "preds_ens"),
+    thr=0.5, save_probs=False, apply_fov=True, resize_to_original=True
+)
+
+# --- Quick visualization of a few test samples (best fold) ---
+@torch.no_grad()
+def _prepare_for_show(x_np):
+    x = x_np.astype(np.float32)
+    if x.max() > 1.0:
+        x /= 255.0
+    return np.clip(x, 0.0, 1.0)
+
+@torch.no_grad()
+def visualize_test_samples_best(n=6, thr=0.5):
+    """
+    Visualization ONLY (no FoV masking here): Original | Pred | GT
+    """
+    model, best_fold, _ = load_best_fold_model(select_metric="dice")
+    shown = 0
+    for batch in test_loader:
+        imgs = batch["image"].to(DEVICE)
+        ids  = batch["id"]
+        gt   = batch["mask"].cpu().numpy()
+
+        logits = model(imgs)
+        probs  = torch.sigmoid(logits)            # <-- NO FoV masking here
+        preds  = (probs > thr).float().cpu().numpy()
+
+        imgs_np = imgs.detach().cpu().numpy().transpose(0, 2, 3, 1)
+        for i in range(imgs.size(0)):
+            if shown >= n:
+                return
+            # show true original if we can
+            orig = None
+            if 'ID2PATH_TEST' in globals():
+                p = ID2PATH_TEST.get(ids[i], None)
+                if p and os.path.exists(p):
+                    orig = np.array(Image.open(p).convert("RGB"))
+            if orig is None:
+                orig = (imgs_np[i] * 255.0).astype(np.uint8)
+
+            fig, axs = plt.subplots(1, 3, figsize=(12, 3.5))
+            axs[0].imshow(_prepare_for_show(orig)); axs[0].set_title(f"Original: {ids[i]}"); axs[0].axis("off")
+            axs[1].imshow(preds[i, 0], cmap="gray"); axs[1].set_title("Pred");               axs[1].axis("off")
+            axs[2].imshow(gt[i, 0],   cmap="gray");   axs[2].set_title("GT");                 axs[2].axis("off")
+            plt.tight_layout(); plt.show()
+            shown += 1
+
+# Example: show 6 predictions from TEST using the best fold (no FoV masking in visualization)
+visualize_test_samples_best(n=6, thr=0.5)
+
