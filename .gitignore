@@ -39,7 +39,7 @@ datasets/
 # Generated predictions
 pred_test/
 
-# OS
+# OS rm
 .DS_Store
 Thumbs.db
 
