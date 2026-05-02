@@ -43,7 +43,7 @@ pred_test/
 .DS_Store
 Thumbs.db
 
-# IDE
+# IDE rm
 .vscode/
 .idea/
 *.swp
