@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# PyTorch / model checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# Training outputs
+outputs/
+runs/
+logs/
+checkpoints/
+
+# Data
+data/
+datasets/
+*.h5
+*.hdf5
+*.npy
+*.npz
+
+# Generated predictions
+pred_test/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

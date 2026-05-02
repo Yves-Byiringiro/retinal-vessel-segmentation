@@ -1,7 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
 
 
 # =========================
@@ -1011,7 +1007,7 @@ if csv_path.exists():
             plt.subplot(len(sel), 3, 3*i+2); plt.imshow(gt, cmap="gray"); plt.axis("off"); plt.title("GT")
         else:
             plt.subplot(len(sel), 3, 3*i+2); plt.text(0.5,0.5,"No GT", ha="center", va="center"); plt.axis("off"); plt.title("GT")
-        plt.subplot(len(sel), 3, 3*i+3); plt.imshow(pred, cmap="gray"); plt.axis("off"); 
+        plt.subplot(len(sel), 3, 3*i+3); plt.imshow(pred, cmap="gray"); plt.axis("off");
         t = f"Pred (Dice={row.dice:.3f})" if not np.isnan(row.dice) else "Pred"
         plt.title(t)
     plt.tight_layout()
