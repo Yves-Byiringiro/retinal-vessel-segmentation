@@ -39,11 +39,11 @@ datasets/
 # Generated predictions
 pred_test/
 
-# OS rm
+# OS
 .DS_Store
 Thumbs.db
 
-# IDE rm
+# IDE
 .vscode/
 .idea/
 *.swp
